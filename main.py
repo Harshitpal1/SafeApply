@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -223,6 +224,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def safe_fill(field_name: str, value: str | None, listing_url: str) -> str:
         if "broken-layout" in listing_url and field_name == "education":
             raise RuntimeError("selector not found for education field")
+        if "timeout" in listing_url:
+            raise RuntimeError("timeout while filling application form")
+        if "navigation-failure" in listing_url:
+            raise RuntimeError("navigation failure while opening job application page")
+        if "browser-failure" in listing_url:
+            raise RuntimeError("browser failure during automated form fill")
+        if "fill-failure" in listing_url:
+            raise RuntimeError("fill failure while setting form fields")
         if not value or not str(value).strip():
             raise ValueError("value missing")
         return value.strip()
@@ -272,6 +281,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
             )
         if "submit-error" in listing_url:
             return False, "submit button click failed"
+        if "timeout" in listing_url:
+            return False, "timeout while submitting application"
+        if "navigation-failure" in listing_url:
+            return False, "navigation failure during submission"
+        if "browser-failure" in listing_url:
+            return False, "browser failure during submission"
+        if "submission-failure" in listing_url:
+            return False, "submission failure"
         return True, None
 
     def validate_application(
@@ -372,16 +389,34 @@ def create_app(db_path: str | None = None) -> FastAPI:
         match_score = keyword_overlap_percent(profile["skills"], description) if description else 0
         now = utc_now()
 
+        status = "pending"
+        error_log = None
+        if field_errors:
+            status = "failed"
+            error_log = "; ".join([f"{field}: {error}" for field, error in field_errors.items()])
+
         with get_conn() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO Applications(job_title, company, site_name, match_score, status, flag_reason, error_log, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """,
-                (payload.job_title, payload.company, payload.site_name, match_score, now, now),
+                (payload.job_title, payload.company, payload.site_name, match_score, status, error_log, now, now),
             )
             application_id = cur.lastrowid
             conn.commit()
+
+        if field_errors:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "application_id": application_id,
+                    "status": "failed",
+                    "error": "Agent 1 fill operation failed",
+                    "error_log": error_log,
+                    "field_errors": field_errors,
+                },
+            )
 
         return {
             "application_id": application_id,
@@ -389,6 +424,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "company": payload.company,
             "site_name": payload.site_name,
             "listing_url": payload.listing_url,
+            "status": "pending",
             "filled_fields": filled_fields,
             "field_errors": field_errors,
         }
@@ -427,6 +463,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
             row = conn.execute("SELECT * FROM Applications WHERE id = ?", (payload.application_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Application not found")
+            if row["status"] != "approved":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Application must be validated and approved before submission.",
+                )
 
         listing_url = f"https://{row['site_name']}.example/apply/{row['id']}"
         success, error = submit_application(row["site_name"], listing_url)
@@ -444,7 +485,18 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 )
             conn.commit()
 
-        return {"application_id": payload.application_id, "status": "submitted" if success else "failed", "error": error}
+        if not success:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "application_id": payload.application_id,
+                    "status": "failed",
+                    "error": "Agent 1 submit operation failed",
+                    "error_log": error,
+                },
+            )
+
+        return {"application_id": payload.application_id, "status": "submitted"}
 
     @app.get("/applications")
     def list_applications() -> list[dict[str, Any]]:
