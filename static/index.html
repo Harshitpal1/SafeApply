@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>SafeApply</title>
+  </head>
+  <body>
+    <h1>SafeApply</h1>
+
+    <h2>Profile</h2>
+    <form id="profile-form">
+      <input name="name" placeholder="Name" required />
+      <input name="skills" placeholder="Skills (comma-separated)" required />
+      <input name="education" placeholder="Education" required />
+      <input name="resume_link" placeholder="Resume Link" required />
+      <input name="preferred_job_type" placeholder="Preferred Job Type" required />
+      <input name="preferred_location" placeholder="Preferred Location" required />
+      <button type="submit">Save Profile</button>
+    </form>
+
+    <h2>Search Jobs</h2>
+    <select id="site-name">
+      <option value="internshala">internshala</option>
+      <option value="wellfound">wellfound</option>
+    </select>
+    <button id="search-jobs">Search Jobs</button>
+    <ul id="job-results"></ul>
+
+    <h2>Approval Summary</h2>
+    <pre id="approval-summary"></pre>
+    <button id="approve-submit" disabled>Approve &amp; Submit</button>
+
+    <h2>Applications</h2>
+    <button id="refresh-applications">Refresh Applications</button>
+    <table border="1">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Job Title</th>
+          <th>Company</th>
+          <th>Match Score</th>
+          <th>Status</th>
+          <th>Flag Reason</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody id="applications-table"></tbody>
+    </table>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
