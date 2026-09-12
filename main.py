@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agents import Agent1, build_default_adapter
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -135,40 +137,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
     with get_conn() as conn:
         create_tables(conn)
 
-    sample_jobs = {
-        "internshala": [
-            {
-                "job_title": "Python Backend Intern",
-                "company": "Alpha Labs",
-                "description": "Build APIs with Python FastAPI and SQLite for backend automation projects.",
-                "listing_url": "https://internshala.com/job/python-backend-intern-1",
-            },
-            {
-                "job_title": "Frontend Intern",
-                "company": "Beta UI",
-                "description": "Work with JavaScript, HTML, and browser automation integrations.",
-                "listing_url": "https://internshala.com/job/frontend-intern-2",
-            },
-            {
-                "job_title": "QA Automation Intern",
-                "company": "Gamma Testing",
-                "description": "Form automation role with unusual layout testing.",
-                "listing_url": "https://internshala.com/job/qa-intern-broken-layout",
-            },
-        ],
-        "wellfound": [
-            {
-                "job_title": "AI Agent Intern",
-                "company": "Delta Agents",
-                "description": "Develop AI agents in Python and integrate LLM APIs.",
-                "listing_url": "https://wellfound.com/jobs/ai-agent-intern-1",
-            }
-        ],
-    }
-
-    def upsert_workflow(site_name: str, purpose: str, steps: dict[str, Any]) -> None:
+    def upsert_workflow(site_name: str, purpose: str, workflow_payload: dict[str, Any]) -> None:
         now = utc_now()
-        payload = json.dumps({"purpose": purpose, "steps": steps})
+        payload = json.dumps(workflow_payload)
         with get_conn() as conn:
             existing = conn.execute(
                 "SELECT id FROM LearnedWorkflows WHERE site_name = ? AND json_extract(workflow_steps, '$.purpose') = ?",
@@ -189,90 +160,46 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def load_workflow(site_name: str, purpose: str) -> dict[str, Any] | None:
         with get_conn() as conn:
             row = conn.execute(
-                "SELECT id, workflow_steps FROM LearnedWorkflows WHERE site_name = ? AND json_extract(workflow_steps, '$.purpose') = ?",
+                "SELECT workflow_steps FROM LearnedWorkflows WHERE site_name = ? AND json_extract(workflow_steps, '$.purpose') = ?",
                 (site_name, purpose),
             ).fetchone()
             if not row:
                 return None
+            return json.loads(row["workflow_steps"])
+
+    def mark_workflow_used(site_name: str, purpose: str) -> None:
+        with get_conn() as conn:
             conn.execute(
-                "UPDATE LearnedWorkflows SET last_used_at = ? WHERE id = ?",
-                (utc_now(), row["id"]),
+                """
+                UPDATE LearnedWorkflows
+                SET last_used_at = ?
+                WHERE site_name = ? AND json_extract(workflow_steps, '$.purpose') = ?
+                """,
+                (utc_now(), site_name, purpose),
             )
             conn.commit()
-            return json.loads(row["workflow_steps"])
 
     def get_profile() -> sqlite3.Row | None:
         with get_conn() as conn:
             return conn.execute("SELECT * FROM Profile WHERE id = 1").fetchone()
 
-    def search_jobs(site_name: str, job_type: str, location: str) -> list[dict[str, Any]]:
-        workflow = load_workflow(site_name, "search")
-        if workflow is None:
-            upsert_workflow(
-                site_name,
-                "search",
-                {
-                    "command": "webcmd search",
-                    "filters": {"job_type": job_type, "location": location},
-                },
-            )
+    agent1 = Agent1(
+        adapter=build_default_adapter(),
+        load_workflow=load_workflow,
+        save_workflow=upsert_workflow,
+        mark_workflow_used=mark_workflow_used,
+    )
 
-        listings = sample_jobs.get(site_name.lower(), sample_jobs["internshala"])
-        return listings
+    def search_jobs(site_name: str, job_type: str, location: str) -> dict[str, Any]:
+        return agent1.search(site_name, job_type, location)
 
-    def safe_fill(field_name: str, value: str | None, listing_url: str) -> str:
-        if "broken-layout" in listing_url and field_name == "education":
-            raise RuntimeError("selector not found for education field")
-        if not value or not str(value).strip():
-            raise ValueError("value missing")
-        return value.strip()
-
-    def fill_application(site_name: str, listing_url: str, profile_data: sqlite3.Row) -> tuple[dict[str, Any], dict[str, str]]:
-        workflow = load_workflow(site_name, "apply")
-        if workflow is None:
-            upsert_workflow(
-                site_name,
-                "apply",
-                {
-                    "command": "webcmd fill",
-                    "selectors": {
-                        "name": "#name",
-                        "resume_link": "#resume",
-                        "education": "#education",
-                        "cover_note": "#cover-note",
-                        "submit": "#submit-btn",
-                    },
-                },
-            )
-
-        filled: dict[str, Any] = {}
-        errors: dict[str, str] = {}
-        candidate_values = {
-            "name": profile_data["name"],
-            "resume_link": profile_data["resume_link"],
-            "education": profile_data["education"],
-            "cover_note": f"Applying with skills: {profile_data['skills']}",
-        }
-
-        for field_name, value in candidate_values.items():
-            try:
-                filled[field_name] = safe_fill(field_name, value, listing_url)
-            except Exception as exc:  # noqa: BLE001
-                errors[field_name] = str(exc)
-
-        return filled, errors
+    def fill_application(site_name: str, listing_url: str, profile_data: sqlite3.Row) -> dict[str, Any]:
+        profile_dict = dict(profile_data)
+        return agent1.fill_application({"site_name": site_name, "listing_url": listing_url}, profile_dict)
 
     def submit_application(site_name: str, listing_url: str) -> tuple[bool, str | None]:
-        workflow = load_workflow(site_name, "submit")
-        if workflow is None:
-            upsert_workflow(
-                site_name,
-                "submit",
-                {"command": "webcmd submit", "selector": "#submit-btn"},
-            )
-        if "submit-error" in listing_url:
-            return False, "submit button click failed"
-        return True, None
+        result = agent1.submit_application(site_name, listing_url)
+        return bool(result["success"]), result.get("error")
 
     def validate_application(
         filled_form_json: dict[str, Any],
@@ -342,7 +269,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if not profile:
             raise HTTPException(status_code=400, detail="Profile not found")
 
-        listings = search_jobs(payload.site_name, profile["preferred_job_type"], profile["preferred_location"])
+        search_result = search_jobs(payload.site_name, profile["preferred_job_type"], profile["preferred_location"])
+        listings = search_result["results"]
         out = []
         for listing in listings:
             match_score = keyword_overlap_percent(profile["skills"], listing["description"])
@@ -353,6 +281,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
                     "match_score": match_score,
                     "listing_url": listing["listing_url"],
                     "description": listing["description"],
+                    "site_name": listing.get("site_name", payload.site_name),
+                    "source_mode": search_result["mode"],
                 }
             )
         return out
@@ -363,9 +293,17 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if not profile:
             raise HTTPException(status_code=400, detail="Profile not found")
 
-        filled_fields, field_errors = fill_application(payload.site_name, payload.listing_url, profile)
+        fill_result = fill_application(payload.site_name, payload.listing_url, profile)
+        filled_fields = dict(fill_result["filled_fields"])
+        if "resume" in filled_fields and "resume_link" not in filled_fields:
+            filled_fields["resume_link"] = filled_fields["resume"]
+        if "cover_letter" in filled_fields and "cover_note" not in filled_fields:
+            filled_fields["cover_note"] = filled_fields["cover_letter"]
+
+        field_errors = list(fill_result["field_errors"])
         description = ""
-        for job in sample_jobs.get(payload.site_name.lower(), []):
+        search_result = search_jobs(payload.site_name, profile["preferred_job_type"], profile["preferred_location"])
+        for job in search_result["results"]:
             if job["listing_url"] == payload.listing_url:
                 description = job["description"]
                 break
@@ -391,6 +329,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
             "listing_url": payload.listing_url,
             "filled_fields": filled_fields,
             "field_errors": field_errors,
+            "success": fill_result["success"],
+            "automation_mode": search_result["mode"],
         }
 
     @app.post("/validate-application")
