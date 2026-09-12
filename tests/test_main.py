@@ -1,8 +1,10 @@
 import sys
+import sqlite3
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import create_app
@@ -34,6 +36,64 @@ def test_profile_roundtrip(tmp_path):
     data = client.get("/profile").json()
     assert data["name"] == "Harshit"
     assert data["preferred_location"] == "remote"
+
+
+def test_database_schema_and_constraints(tmp_path):
+    db_path = tmp_path / "test.db"
+    client = TestClient(create_app(str(db_path)))
+    assert client.get("/profile").status_code == 200
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('Profile', 'LearnedWorkflows', 'Applications')"
+            ).fetchall()
+        }
+        assert tables == {"Profile", "LearnedWorkflows", "Applications"}
+
+        profile_cols = [row[1] for row in conn.execute("PRAGMA table_info(Profile)").fetchall()]
+        workflow_cols = [row[1] for row in conn.execute("PRAGMA table_info(LearnedWorkflows)").fetchall()]
+        application_cols = [row[1] for row in conn.execute("PRAGMA table_info(Applications)").fetchall()]
+
+        assert profile_cols == [
+            "id",
+            "name",
+            "skills",
+            "education",
+            "resume_link",
+            "preferred_job_type",
+            "preferred_location",
+        ]
+        assert workflow_cols == ["id", "site_name", "workflow_steps", "created_at", "last_used_at"]
+        assert application_cols == [
+            "id",
+            "job_title",
+            "company",
+            "site_name",
+            "match_score",
+            "status",
+            "flag_reason",
+            "error_log",
+            "created_at",
+            "updated_at",
+        ]
+
+        for status in ("pending", "flagged", "approved", "submitted", "failed"):
+            conn.execute("INSERT INTO Applications(status) VALUES (?)", (status,))
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO Applications(status) VALUES ('unexpected')")
+
+        conn.execute(
+            "INSERT INTO LearnedWorkflows(site_name, workflow_steps, created_at, last_used_at) VALUES (?, ?, ?, ?)",
+            ("internshala", '{"selectors":{"name":"#name"}}', "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO LearnedWorkflows(site_name, workflow_steps, created_at, last_used_at) VALUES (?, ?, ?, ?)",
+                ("internshala", "{invalid json", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            )
 
 
 def test_search_jobs_returns_match_score(tmp_path):

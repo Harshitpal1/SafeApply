@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+ALLOWED_APPLICATION_STATUSES = ("pending", "flagged", "approved", "submitted", "failed")
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -66,6 +68,7 @@ class ApproveApplicationIn(BaseModel):
 
 
 def create_tables(conn: sqlite3.Connection) -> None:
+    status_values_sql = ", ".join(f"'{value}'" for value in ALLOWED_APPLICATION_STATUSES)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS Profile (
@@ -98,12 +101,60 @@ def create_tables(conn: sqlite3.Connection) -> None:
             company TEXT,
             site_name TEXT,
             match_score INTEGER,
-            status TEXT,
+            status TEXT CHECK(status IN ('pending', 'flagged', 'approved', 'submitted', 'failed')),
             flag_reason TEXT,
             error_log TEXT,
             created_at TEXT,
             updated_at TEXT
         )
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS applications_status_insert_check")
+    conn.execute("DROP TRIGGER IF EXISTS applications_status_update_check")
+    conn.execute(
+        f"""
+        CREATE TRIGGER applications_status_insert_check
+        BEFORE INSERT ON Applications
+        FOR EACH ROW
+        WHEN NEW.status NOT IN ({status_values_sql})
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid application status');
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER applications_status_update_check
+        BEFORE UPDATE OF status ON Applications
+        FOR EACH ROW
+        WHEN NEW.status NOT IN ({status_values_sql})
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid application status');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS learned_workflows_json_insert_check")
+    conn.execute("DROP TRIGGER IF EXISTS learned_workflows_json_update_check")
+    conn.execute(
+        """
+        CREATE TRIGGER learned_workflows_json_insert_check
+        BEFORE INSERT ON LearnedWorkflows
+        FOR EACH ROW
+        WHEN NEW.workflow_steps IS NOT NULL AND json_valid(NEW.workflow_steps) = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow_steps must be valid JSON');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER learned_workflows_json_update_check
+        BEFORE UPDATE OF workflow_steps ON LearnedWorkflows
+        FOR EACH ROW
+        WHEN NEW.workflow_steps IS NOT NULL AND json_valid(NEW.workflow_steps) = 0
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow_steps must be valid JSON');
+        END
         """
     )
     conn.commit()
