@@ -84,7 +84,7 @@ def create_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS LearnedWorkflows (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             site_name TEXT,
-            workflow_steps TEXT,
+            workflow_steps TEXT CHECK (workflow_steps IS NULL OR json_valid(workflow_steps)),
             created_at TEXT,
             last_used_at TEXT
         )
@@ -98,7 +98,7 @@ def create_tables(conn: sqlite3.Connection) -> None:
             company TEXT,
             site_name TEXT,
             match_score INTEGER,
-            status TEXT,
+            status TEXT CHECK (status IN ('pending', 'flagged', 'approved', 'submitted', 'failed')),
             flag_reason TEXT,
             error_log TEXT,
             created_at TEXT,
